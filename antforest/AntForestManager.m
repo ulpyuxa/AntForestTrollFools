@@ -1780,9 +1780,34 @@ static NSTimeInterval lastMyBubblesQueryTime = 0;
 static NSInteger myOceanCleanCount = 0;
 static NSMutableDictionary *friendOceanCleanCounts = nil;
 
+// 风控修复（fix2）：神奇海洋的 RPC 只允许通过“真实的神奇海洋页面 Bridge”发出。
+// 旧逻辑 `self.oceanBridge ?: self.jsBridge` 会在用户仅停留在森林首页时，借森林首页的
+// Bridge（URL 为 render.alipay.com/.../180020010001247580/home.html）去调 alipay.antocean.ocean.h5.*
+// 跨业务接口。正常客户端不可能出现“森林页面调海洋接口”的组合，用户实测开启此开关后
+// 进入森林约 3 秒即触发“访问被拒绝/请检查代理或VPN”风控页，关闭后恢复正常。
+// 现改为：没有真实海洋页面 Bridge 时直接跳过（用户手动进入神奇海洋后才会执行清理）。
+- (id)oceanOnlyBridge {
+    id b = self.oceanBridge;
+    if (!b || b == self.jsBridge) return nil;
+    return b;
+}
+
+- (NSString *)oceanOnlyUrl {
+    return self.oceanH5Url.length ? self.oceanH5Url : @"https://2021003115672468.h5app.alipay.com/www/index.html";
+}
+
 -(void)cleanMyOceanThoroughly {
     if (!isWithinTaskActiveHours()) return;
-    if (!self.enableCleanOcean || (!self.jsBridge && !self.oceanBridge)) return;
+    if (!self.enableCleanOcean) return;
+    if (![self oceanOnlyBridge]) {
+        static NSTimeInterval sLastSkipLog = 0;
+        NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
+        if (now - sLastSkipLog > 1800.0) {
+            sLastSkipLog = now;
+            [self recordStage:@"神奇海洋：未检测到海洋页面，已跳过首页跨业务清理（请手动进入神奇海洋后自动执行）"];
+        }
+        return;
+    }
     myOceanCleanCount = 0;
     [self cleanMyOcean];
 }
@@ -1791,17 +1816,15 @@ static NSMutableDictionary *friendOceanCleanCounts = nil;
 -(void)cleanMyOcean{
     if (!isWithinTaskActiveHours()) return;
     if (!self.myUserId.length) return;
+    if (![self oceanOnlyBridge]) return;
     self.lastCleanedOceanUserId = self.myUserId;
     NSString *timeStamp = [NSString stringWithFormat:@"%ld",(long)[[NSDate  date] timeIntervalSince1970]*1000];
     NSString *randNum=[AntForestManager getNumberRandom:15];
     NSString *randNum2=[AntForestManager getNumberRandom:16];
     NSString *callbackId = [NSString stringWithFormat:@"rpc_af_silent_ocean_%@.%@", timeStamp, randNum2];
     NSString *arg1=[NSString stringWithFormat:@"[{\"handlerName\":\"rpc\",\"data\":{\"operationType\":\"alipay.antocean.ocean.h5.cleanOcean\",\"showError\":false,\"showLoading\":false,\"requestData\":[{\"cleanedUserId\":\"%@\",\"userId\":\"%@\",\"source\":\"ANT_FOREST\",\"uniqueId\":\"%@%@\"}],\"appName\":\"antocean\",\"facadeName\":\"InteractController\",\"methodName\":\"cleanOcean\",\"getResponse\":true},\"callbackId\":\"%@\"}]",self.myUserId,self.myUserId,timeStamp,randNum,callbackId];
-    id bridge = self.oceanBridge ?: self.jsBridge;
-    NSString *arg2 = (bridge == self.oceanBridge && self.oceanH5Url.length) ? self.oceanH5Url : ([self effectiveUrlForBridge:bridge] ?: @"https://2021003115672468.h5app.alipay.com/www/index.html");
-    if (bridge == self.jsBridge) {
-        arg2 = [self effectiveUrlForBridge:bridge] ?: @"https://render.alipay.com/p/yuyan/180020010001247580/home.html";
-    }
+    id bridge = [self oceanOnlyBridge];
+    NSString *arg2 = [self oceanOnlyUrl];
     if(bridge) {
         [bridge _doFlushMessageQueue:arg1 url:arg2];
     }
@@ -1811,19 +1834,15 @@ static NSMutableDictionary *friendOceanCleanCounts = nil;
 -(void)cleanFriendsOcean:(NSString*)uid{
     if (!isWithinTaskActiveHours()) return;
     if (!uid.length) return;
+    if (![self oceanOnlyBridge]) return;
     self.lastCleanedOceanUserId = uid;
     NSString *timeStamp = [NSString stringWithFormat:@"%ld",(long)[[NSDate  date] timeIntervalSince1970]*1000];
     NSString *randNum=[AntForestManager getNumberRandom:15];
     NSString *randNum2=[AntForestManager getNumberRandom:16];
     NSString *callbackId = [NSString stringWithFormat:@"rpc_af_silent_ocean_%@.%@", timeStamp, randNum2];
     NSString *arg1=[NSString stringWithFormat:@"[{\"handlerName\":\"rpc\",\"data\":{\"operationType\":\"alipay.antocean.ocean.h5.cleanFriendOcean\",\"showError\":false,\"showLoading\":false,\"requestData\":[{\"cleanedUserId\":\"%@\",\"userId\":\"%@\",\"source\":\"ANT_FOREST\",\"uniqueId\":\"%@%@\"}],\"appName\":\"antocean\",\"facadeName\":\"InteractController\",\"methodName\":\"cleanFriendsOcean\",\"getResponse\":true},\"callbackId\":\"%@\"}]",uid,uid,timeStamp,randNum,callbackId];
-    id bridge = self.oceanBridge ?: self.jsBridge;
-    NSString *arg2 = [NSString stringWithFormat:@"https://2021003115672468.h5app.alipay.com/www/index.html?fromAct=SAIL_AWAY&userId=%@&interactFlags=&source=ANT_FOREST&__webview_options__=ttb%%3Dauto%%26pd%%3DNO%%26bc%%3D1324950",uid];
-    if (bridge == self.oceanBridge && self.oceanH5Url.length) {
-        arg2 = self.oceanH5Url;
-    } else if (bridge == self.jsBridge) {
-        arg2 = [self effectiveUrlForBridge:bridge] ?: @"https://render.alipay.com/p/yuyan/180020010001247580/home.html";
-    }
+    id bridge = [self oceanOnlyBridge];
+    NSString *arg2 = [self oceanOnlyUrl];
     if(bridge) {
         [bridge _doFlushMessageQueue:arg1 url:arg2];
     }
@@ -1840,6 +1859,7 @@ static NSMutableDictionary *friendOceanCleanCounts = nil;
         return;
     }
     if (!self.enableCleanOcean) return;
+    if (![self oceanOnlyBridge]) return; // 风控修复：无真实海洋页面 Bridge 时不在森林首页发海洋 RPC
     NSString *today = getCurrentDateString();
     NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
     if (![[defaults stringForKey:@"oceanCleanedDate"] isEqualToString:today]) {
@@ -1851,11 +1871,8 @@ static NSMutableDictionary *friendOceanCleanCounts = nil;
     NSString *randNum=[AntForestManager getNumberRandom:15];
     NSString *callbackId = [NSString stringWithFormat:@"rpc_af_silent_ocean_%@.%@", timeStamp, randNum];
     NSString *arg1=[NSString stringWithFormat:@"[{\"handlerName\":\"rpc\",\"data\":{\"operationType\":\"alipay.antocean.ocean.h5.queryFriendList\",\"showError\":false,\"showLoading\":false,\"requestData\":[{\"source\":\"ANT_FOREST\",\"uniqueId\":\"%@%@\"}],\"appName\":\"antocean\",\"facadeName\":\"InteractController\",\"methodName\":\"queryFriendList\",\"getResponse\":true},\"callbackId\":\"%@\"}]", timeStamp, randNum, callbackId];
-    id bridge = self.oceanBridge ?: self.jsBridge;
-    NSString *arg2 = (bridge == self.oceanBridge && self.oceanH5Url.length) ? self.oceanH5Url : @"https://2021003115672468.h5app.alipay.com/www/index.html";
-    if (bridge == self.jsBridge) {
-        arg2 = [self effectiveUrlForBridge:bridge] ?: @"https://render.alipay.com/p/yuyan/180020010001247580/home.html";
-    }
+    id bridge = [self oceanOnlyBridge];
+    NSString *arg2 = [self oceanOnlyUrl];
     if(bridge) {
         [self recordStage:@"请求神奇海洋好友列表"];
         [bridge _doFlushMessageQueue:arg1 url:arg2];
@@ -6760,7 +6777,7 @@ static const NSUInteger kOceanMaxCleanPerRound = 5;
         [oceanQueue removeAllObjects];
         return;
     }
-    id bridge = self.oceanBridge ?: self.jsBridge;
+    id bridge = [self oceanOnlyBridge]; // 风控修复：仅用真实海洋页面 Bridge
     if (!self.enableCleanOcean || !bridge) {
         if (oceanRunning) [self oceanStopWithReason:@"任务已停止或桥接不可用"];
         return;
@@ -6830,6 +6847,7 @@ static BOOL oceanPlanLoggedThisRound = NO;
 
 -(void)scanOceanForFriends:(NSArray<NSString *> *)friendIds {
     if (!self.enableCleanOcean || !friendIds.count) return;
+    if (![self oceanOnlyBridge]) return; // 风控修复：无真实海洋页面 Bridge 时不入队、不发好友海域 RPC
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         oceanQueue = [NSMutableArray array];
@@ -7538,7 +7556,7 @@ static BOOL oceanPlanLoggedThisRound = NO;
                         myOceanCleanCount++;
                         if (myOceanCleanCount < 8) {
                             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(600 * NSEC_PER_MSEC)), dispatch_get_main_queue(), ^{
-                                if (self.enableCleanOcean && (self.jsBridge || self.oceanBridge)) {
+                                if (self.enableCleanOcean && [self oceanOnlyBridge]) {
                                     [self cleanMyOcean];
                                 }
                             });

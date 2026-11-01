@@ -27,7 +27,12 @@ grep -Fq 'AntForestPort-Ocean 收取日志' "$entry_file"
 grep -Fq 'isSafeOceanTask' "$source_file"
 grep -Fq 'sLastExecutedSceneCode containsString:@"OCEAN"' "$source_file"
 grep -Fq 'queryOceanTaskListWithForce:YES' "$source_file"
-grep -Fq 'id bridge = self.oceanBridge ?: self.jsBridge;' "$source_file"
+# 风控修复（fix2）：海洋 RPC 不得再兜底到森林首页 Bridge，只允许真实海洋页面 Bridge
+grep -Fq 'id bridge = [self oceanOnlyBridge];' "$source_file"
+if grep -Fq 'self.oceanBridge ?: self.jsBridge;' "$source_file"; then
+  echo "❌ 海洋 RPC 仍存在兜底到森林首页 Bridge 的用法（会触发风控）" >&2
+  exit 1
+fi
 grep -Fq 'self.lastCleanedOceanUserId = nil;' "$source_file"
 grep -Fq 'scanOceanForFriends:fr.allKeys' "$source_file"
 grep -Fq 'cleanFriendOcean' "$entry_file"
