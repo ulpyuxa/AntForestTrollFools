@@ -11,6 +11,9 @@
 #import <objc/message.h>
 #import "Tool.h"
 
+// 前置声明：真实 UA 读取（定义见 silentlyPrefetchTaskUrl 附近）
+static void refreshRealWebViewUA(void);
+
 @implementation AntForestManager
 
 static AntForestManager *afm = nil;
@@ -2402,6 +2405,11 @@ static BOOL isSafeFarmTask(NSString *taskType, NSString *title) {
 - (void)registerBridge:(id)bridge withUrl:(NSString *)url {
     if (!bridge) return;
     
+    // 风控修复：任一 H5 Bridge 注册后，延迟读取支付宝 WebView 的真实 UA 并缓存，供后台预取使用
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        refreshRealWebViewUA();
+    });
+    
     NSString *effectiveUrl = url.length ? url : [self effectiveUrlForBridge:bridge];
     NSString *lowerUrl = effectiveUrl.lowercaseString;
     
@@ -3196,7 +3204,59 @@ static NSInteger sVitalityAutoRefreshRounds = 0;
     }
 }
 
-static WKWebView *sSilentTaskWebView = nil;
+// 风控修复：不再硬编码过期的 UA（iOS 16_2 / AP 12.12.16 / WIFI / 393x852）。
+// 从支付宝自身的 Nebula WebView 读取真实 UA（含真实 iOS 版本、支付宝版本、网络类型、屏幕尺寸），
+// 保证插件发出的 H5 请求与原生客户端身份一致，避免同一会话内出现两套互相矛盾的设备指纹。
+static NSString *sRealWebViewUA = nil;
+
+static id firstAvailableWebViewForUA(void) {
+    AntForestManager *mgr = [AntForestManager sharedInstance];
+    NSArray *bridges = @[mgr.jsBridge ?: (id)[NSNull null],
+                         mgr.rewardTaskBridge ?: (id)[NSNull null],
+                         mgr.farmBridge ?: (id)[NSNull null],
+                         mgr.oceanBridge ?: (id)[NSNull null],
+                         mgr.aiFishBridge ?: (id)[NSNull null],
+                         mgr.lotteryBridge ?: (id)[NSNull null],
+                         mgr.monopolyBridge ?: (id)[NSNull null]];
+    for (id b in bridges) {
+        if (b == (id)[NSNull null]) continue;
+        @try {
+            id cv = [b respondsToSelector:@selector(contentView)] ? ((id (*)(id, SEL))objc_msgSend)(b, @selector(contentView)) : nil;
+            if ([cv respondsToSelector:@selector(webView)]) {
+                id wv = ((id (*)(id, SEL))objc_msgSend)(cv, @selector(webView));
+                if (wv) return wv;
+            }
+            if ([b respondsToSelector:@selector(webView)]) {
+                id wv = ((id (*)(id, SEL))objc_msgSend)(b, @selector(webView));
+                if (wv) return wv;
+            }
+        } @catch (NSException *e) {}
+    }
+    return nil;
+}
+
+// 异步刷新真实 UA 缓存：优先读 WKWebView.customUserAgent（Nebula 容器设置的完整 UA），
+// 否则通过 navigator.userAgent 取。必须在主线程调用。
+static void refreshRealWebViewUA(void) {
+    @try {
+        id wv = firstAvailableWebViewForUA();
+        if (!wv) return;
+        if ([wv respondsToSelector:@selector(customUserAgent)]) {
+            NSString *cua = ((NSString *(*)(id, SEL))objc_msgSend)(wv, @selector(customUserAgent));
+            if ([cua isKindOfClass:NSString.class] && [cua containsString:@"AlipayClient/"]) {
+                sRealWebViewUA = [cua copy];
+                return;
+            }
+        }
+        if ([wv respondsToSelector:@selector(evaluateJavaScript:completionHandler:)]) {
+            ((void (*)(id, SEL, NSString *, void (^)(id, NSError *)))objc_msgSend)(wv, @selector(evaluateJavaScript:completionHandler:), @"navigator.userAgent", ^(id result, NSError *err) {
+                if ([result isKindOfClass:NSString.class] && [(NSString *)result containsString:@"AlipayClient/"]) {
+                    sRealWebViewUA = [(NSString *)result copy];
+                }
+            });
+        }
+    } @catch (NSException *e) {}
+}
 
 static void silentlyPrefetchTaskUrl(NSString *jumpUrl) {
     if (!jumpUrl.length) return;
@@ -3220,29 +3280,33 @@ static void silentlyPrefetchTaskUrl(NSString *jumpUrl) {
     if ([cleanUrl hasPrefix:@"http://"] || [cleanUrl hasPrefix:@"https://"]) {
         NSURL *reqUrl = [NSURL URLWithString:cleanUrl];
         if (reqUrl) {
+            // 风控修复 1：淘宝/天猫/闲鱼/starlink 等导流外链一律不做后台预取。
+            // 这些页面带有阿里前端风控 JS（sufei），在插件自建的 1x1 隐藏 WKWebView 中加载时
+            // 既没有 Nebula 容器也没有 AlipayJSBridge / 免登 token，必然被判定 FAIL_SYS_ILLEGAL_ACCESS，
+            // 并触发支付宝“访问被拒绝 / 请检查是否使用了代理软件或VPN”风控页，甚至清空淘宝登录态。
+            NSString *lowerClean = cleanUrl.lowercaseString;
+            NSString *lowerJump = jumpUrl.lowercaseString;
+            BOOL isTaobaoOrDaoliu = [lowerClean containsString:@"taobao.com"] || [lowerClean containsString:@"tmall.com"] || [lowerClean containsString:@"goofish.com"] || [lowerClean containsString:@"starlink"] || [lowerClean containsString:@"qiandao"] || [lowerJump containsString:@"taobao"] || [lowerJump containsString:@"starlink"] || [lowerJump containsString:@"tmall"];
+            if (isTaobaoOrDaoliu) {
+                [[AntForestManager sharedInstance] recordStage:@"领奖励：检测到淘宝/导流类外链，已跳过后台预取（避免触发风控）"];
+                return;
+            }
+
+            // 风控修复 2：只对支付宝自有域名做预取，且使用从真实 WebView 读取的 UA；
+            // 未拿到真实 UA 时直接跳过，不再回退到硬编码的过期 UA。
+            NSString *host = reqUrl.host.lowercaseString ?: @"";
+            BOOL isAlipayHost = [host hasSuffix:@".alipay.com"] || [host hasSuffix:@".alipayobjects.com"] || [host hasSuffix:@".antgroup.com"] || [host hasSuffix:@".alipay.net"];
+            if (!isAlipayHost) {
+                return;
+            }
+            NSString *ua = sRealWebViewUA;
+            if (!ua.length) {
+                dispatch_async(dispatch_get_main_queue(), ^{ refreshRealWebViewUA(); });
+                return;
+            }
             NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:reqUrl cachePolicy:NSURLRequestReloadIgnoringLocalCacheData timeoutInterval:8.0];
-            NSString *ua = @"Mozilla/5.0 (iPhone; CPU iPhone OS 16_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 Nebula AlipayDefined(nt:WIFI,ws:393|759,fx:393|852) AliApp(AP/12.12.16.6000) AlipayClient/12.12.16.6000 Language/zh-Hans";
             [req setValue:ua forHTTPHeaderField:@"User-Agent"];
             [[[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(__unused NSData *d, __unused NSURLResponse *res, __unused NSError *err){}] resume];
-            
-            // 针对淘宝/导流等需执行前端鉴权的外链，在离屏纯静默微型 WebView 中加载（严禁 pushWindow 弹窗以防唤起外部 App 与绿屏卡死）
-            BOOL isTaobaoOrDaoliu = [cleanUrl containsString:@"taobao.com"] || [cleanUrl containsString:@"starlink"] || [cleanUrl containsString:@"tmall.com"] || [cleanUrl containsString:@"goofish.com"] || [cleanUrl containsString:@"qiandao"] || [jumpUrl containsString:@"taobao"] || [jumpUrl containsString:@"starlink"];
-            if (isTaobaoOrDaoliu) {
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    @try {
-                        if (!sSilentTaskWebView) {
-                            WKWebViewConfiguration *config = [[WKWebViewConfiguration alloc] init];
-                            config.applicationNameForUserAgent = @"Nebula AlipayDefined(nt:WIFI,ws:393|759,fx:393|852) AliApp(AP/12.12.16.6000) AlipayClient/12.12.16.6000 Language/zh-Hans";
-                            sSilentTaskWebView = [[WKWebView alloc] initWithFrame:CGRectMake(0, 0, 1, 1) configuration:config];
-                            sSilentTaskWebView.customUserAgent = ua;
-                            sSilentTaskWebView.alpha = 0.01;
-                            sSilentTaskWebView.hidden = YES;
-                            sSilentTaskWebView.navigationDelegate = [AntForestManager sharedInstance];
-                        }
-                        [sSilentTaskWebView loadRequest:req];
-                    } @catch (NSException *e) {}
-                });
-            }
         }
     }
 }

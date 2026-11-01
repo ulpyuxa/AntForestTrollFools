@@ -1,0 +1,63 @@
+name: Build AntForestPort dylib
+
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - "PortEntry.m"
+      - "antforest/**"
+      - "Makefile"
+      - ".github/workflows/build-dylib.yml"
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version tag used in output file name (e.g. v3.2.7-fix1)"
+        required: false
+        default: ""
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+          xcrun --sdk iphoneos --find clang
+
+      - name: Run source checks
+        run: make test
+
+      - name: Build universal dylibs (iOS15+ and iOS14)
+        run: |
+          set -euxo pipefail
+          rm -rf build
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            make VERSION="${{ github.event.inputs.version }}"
+          else
+            make
+          fi
+          ls -la build
+
+      - name: Verify architectures
+        run: |
+          set -euxo pipefail
+          for f in build/*.dylib; do
+            echo "== $f"
+            lipo -info "$f"
+            otool -l "$f" | grep -A3 "LC_BUILD_VERSION\|LC_VERSION_MIN" | head -20 || true
+          done
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: AntForestPort-dylib-${{ github.sha }}
+          path: build/*.dylib
+          if-no-files-found: error
+          retention-days: 30
