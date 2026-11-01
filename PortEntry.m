@@ -864,6 +864,7 @@ static void installEarnEnergyCollector(id controller) {
 @property (nonatomic, strong) UILabel *totalLabel;
 @property (nonatomic, strong) UILabel *statusLabel;
 @property (nonatomic, strong) UIButton *intervalButton;
+@property (nonatomic, strong) UILabel *loopDetailLabel;
 @end
 
 @interface AntForestSchedulePanel : UIViewController <UITableViewDataSource, UITableViewDelegate>
@@ -875,6 +876,7 @@ static void installEarnEnergyCollector(id controller) {
 @end
 
 @interface AntForestIntervalPanel : UIViewController
+@property (nonatomic, copy) void (^onDismiss)(void);
 @end
 
 @interface AntForestStepSimulatorPanel : UIViewController
@@ -913,14 +915,61 @@ static void installEarnEnergyCollector(id controller) {
     void (^update)(void) = ^{ value.text = [NSString stringWithFormat:@"%d 分钟", (int)lroundf(slider.value)]; };
     update();
     [slider addAction:[UIAction actionWithHandler:^(__unused UIAction *action) { slider.value = roundf(slider.value); update(); }] forControlEvents:UIControlEventValueChanged];
+    // ---- 执行时间段（可选）：仅在 开始-结束 时间内执行后台循环，其余时间静默跳过 ----
+    AntForestManager *mgr = AntForestManager.sharedInstance;
+    NSDateFormatter *hm = [[NSDateFormatter alloc] init]; hm.dateFormat = @"HH:mm"; hm.locale = [NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
+    UILabel *rangeTitle = [[UILabel alloc] init]; rangeTitle.text = @"仅在时间段内执行"; rangeTitle.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold]; rangeTitle.textColor = UIColor.labelColor;
+    UILabel *rangeDetail = [[UILabel alloc] init]; rangeDetail.text = @"关闭则全天循环；支持跨午夜（如 22:00 - 06:00）"; rangeDetail.font = [UIFont systemFontOfSize:12]; rangeDetail.textColor = UIColor.secondaryLabelColor; rangeDetail.numberOfLines = 2;
+    UIStackView *rangeText = [[UIStackView alloc] initWithArrangedSubviews:@[rangeTitle, rangeDetail]]; rangeText.axis = UILayoutConstraintAxisVertical; rangeText.spacing = 3;
+    UISwitch *rangeSwitch = [[UISwitch alloc] init]; rangeSwitch.on = mgr.enableBackgroundLoopTimeRange;
+    UIStackView *rangeRow = [[UIStackView alloc] initWithArrangedSubviews:@[rangeText, rangeSwitch]]; rangeRow.alignment = UIStackViewAlignmentCenter; rangeRow.distribution = UIStackViewDistributionEqualSpacing; rangeRow.spacing = 12; rangeRow.translatesAutoresizingMaskIntoConstraints = NO;
+
+    UILabel *startLabel = [[UILabel alloc] init]; startLabel.text = @"开始"; startLabel.font = [UIFont systemFontOfSize:15]; startLabel.textColor = UIColor.labelColor;
+    UIDatePicker *startPicker = [[UIDatePicker alloc] init]; startPicker.datePickerMode = UIDatePickerModeTime; startPicker.minuteInterval = 1;
+    if (@available(iOS 13.4, *)) startPicker.preferredDatePickerStyle = UIDatePickerStyleCompact;
+    startPicker.date = [hm dateFromString:mgr.backgroundLoopStartTime ?: @"00:00"] ?: [hm dateFromString:@"00:00"];
+    UILabel *dash = [[UILabel alloc] init]; dash.text = @"—"; dash.font = [UIFont systemFontOfSize:15]; dash.textColor = UIColor.secondaryLabelColor;
+    UILabel *endLabel = [[UILabel alloc] init]; endLabel.text = @"结束"; endLabel.font = [UIFont systemFontOfSize:15]; endLabel.textColor = UIColor.labelColor;
+    UIDatePicker *endPicker = [[UIDatePicker alloc] init]; endPicker.datePickerMode = UIDatePickerModeTime; endPicker.minuteInterval = 1;
+    if (@available(iOS 13.4, *)) endPicker.preferredDatePickerStyle = UIDatePickerStyleCompact;
+    endPicker.date = [hm dateFromString:mgr.backgroundLoopEndTime ?: @"23:59"] ?: [hm dateFromString:@"23:59"];
+    UIStackView *pickersRow = [[UIStackView alloc] initWithArrangedSubviews:@[startLabel, startPicker, dash, endLabel, endPicker]]; pickersRow.alignment = UIStackViewAlignmentCenter; pickersRow.spacing = 8; pickersRow.translatesAutoresizingMaskIntoConstraints = NO;
+    void (^syncRangeEnabled)(void) = ^{ pickersRow.alpha = rangeSwitch.on ? 1.0 : 0.4; pickersRow.userInteractionEnabled = rangeSwitch.on; };
+    syncRangeEnabled();
+    [rangeSwitch addAction:[UIAction actionWithHandler:^(__unused UIAction *action) { syncRangeEnabled(); }] forControlEvents:UIControlEventValueChanged];
+
     UIButton *save = [UIButton buttonWithType:UIButtonTypeSystem]; [save setTitle:@"保存" forState:UIControlStateNormal]; save.titleLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold]; save.translatesAutoresizingMaskIntoConstraints = NO;
-    [save addAction:[UIAction actionWithHandler:^(__unused UIAction *action) { NSInteger minutes = lroundf(slider.value); AntForestManager *manager = AntForestManager.sharedInstance; manager.collectInterval = minutes * 60; [NSUserDefaults.standardUserDefaults setInteger:minutes forKey:@"backgroundIntervalMinutes"]; if (manager.enableAutoCollect && manager.enableBackgroundLoop) [manager startAutoCollectTimerWithInterval:manager.collectInterval]; [self dismissViewControllerAnimated:YES completion:nil]; }] forControlEvents:UIControlEventTouchUpInside];
-    [self.view addSubview:title]; [self.view addSubview:slider]; [self.view addSubview:value]; [self.view addSubview:save];
+    [save addAction:[UIAction actionWithHandler:^(__unused UIAction *action) {
+        NSInteger minutes = lroundf(slider.value);
+        AntForestManager *manager = AntForestManager.sharedInstance;
+        manager.collectInterval = minutes * 60;
+        [NSUserDefaults.standardUserDefaults setInteger:minutes forKey:@"backgroundIntervalMinutes"];
+        // 保存时间段设置
+        NSString *startStr = [hm stringFromDate:startPicker.date] ?: @"00:00";
+        NSString *endStr = [hm stringFromDate:endPicker.date] ?: @"23:59";
+        manager.enableBackgroundLoopTimeRange = rangeSwitch.on;
+        manager.backgroundLoopStartTime = startStr;
+        manager.backgroundLoopEndTime = endStr;
+        [NSUserDefaults.standardUserDefaults setBool:rangeSwitch.on forKey:@"enableBackgroundLoopTimeRange"];
+        [NSUserDefaults.standardUserDefaults setObject:startStr forKey:@"backgroundLoopStartTime"];
+        [NSUserDefaults.standardUserDefaults setObject:endStr forKey:@"backgroundLoopEndTime"];
+        if (rangeSwitch.on) {
+            [manager recordStage:[NSString stringWithFormat:@"后台循环 · 执行时段已设置为 %@ - %@（间隔 %ld 分钟）", startStr, endStr, (long)minutes]];
+        } else {
+            [manager recordStage:[NSString stringWithFormat:@"后台循环 · 已取消时段限制，全天循环（间隔 %ld 分钟）", (long)minutes]];
+        }
+        if (manager.enableAutoCollect && manager.enableBackgroundLoop) [manager startAutoCollectTimerWithInterval:manager.collectInterval];
+        void (^done)(void) = self.onDismiss;
+        [self dismissViewControllerAnimated:YES completion:^{ if (done) done(); }];
+    }] forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:title]; [self.view addSubview:slider]; [self.view addSubview:value]; [self.view addSubview:rangeRow]; [self.view addSubview:pickersRow]; [self.view addSubview:save];
     [NSLayoutConstraint activateConstraints:@[
         [title.topAnchor constraintEqualToAnchor:self.view.topAnchor constant:28], [title.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
         [value.topAnchor constraintEqualToAnchor:title.bottomAnchor constant:20], [value.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
         [slider.topAnchor constraintEqualToAnchor:value.bottomAnchor constant:20], [slider.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:28], [slider.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-28],
-        [save.topAnchor constraintEqualToAnchor:slider.bottomAnchor constant:24], [save.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
+        [rangeRow.topAnchor constraintEqualToAnchor:slider.bottomAnchor constant:28], [rangeRow.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor constant:28], [rangeRow.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor constant:-28],
+        [pickersRow.topAnchor constraintEqualToAnchor:rangeRow.bottomAnchor constant:14], [pickersRow.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
+        [save.topAnchor constraintEqualToAnchor:pickersRow.bottomAnchor constant:24], [save.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
     ]];
 }
 @end
@@ -1796,6 +1845,7 @@ static void installEarnEnergyCollector(id controller) {
     loopDetail.textColor = UIColor.secondaryLabelColor;
     loopDetail.adjustsFontSizeToFitWidth = YES;
     loopDetail.minimumScaleFactor = 0.8;
+    self.loopDetailLabel = loopDetail;
     UIStackView *loopText = [[UIStackView alloc] initWithArrangedSubviews:@[loopLabel, loopDetail]];
     loopText.axis = UILayoutConstraintAxisVertical;
     loopText.spacing = 3;
@@ -2026,12 +2076,20 @@ static void installEarnEnergyCollector(id controller) {
 - (void)updateIntervalLabel {
     NSInteger minutes = MAX(1, [NSUserDefaults.standardUserDefaults integerForKey:@"backgroundIntervalMinutes"] ?: 5);
     [self.intervalButton setTitle:[NSString stringWithFormat:@"%ld 分钟", (long)minutes] forState:UIControlStateNormal];
+    AntForestManager *manager = AntForestManager.sharedInstance;
+    if (manager.enableBackgroundLoopTimeRange) {
+        self.loopDetailLabel.text = [NSString stringWithFormat:@"仅在 %@ - %@ 内定时轮询", manager.backgroundLoopStartTime ?: @"00:00", manager.backgroundLoopEndTime ?: @"23:59"];
+    } else {
+        self.loopDetailLabel.text = @"按设定间隔在后台定时静默轮询";
+    }
 }
 
 - (void)showIntervalSettings {
     AntForestIntervalPanel *settings = [[AntForestIntervalPanel alloc] init];
     settings.modalPresentationStyle = UIModalPresentationPageSheet;
-    if (@available(iOS 15.0, *)) settings.sheetPresentationController.detents = @[UISheetPresentationControllerDetent.mediumDetent];
+    if (@available(iOS 15.0, *)) settings.sheetPresentationController.detents = @[UISheetPresentationControllerDetent.mediumDetent, UISheetPresentationControllerDetent.largeDetent];
+    __weak typeof(self) weakSelf = self;
+    settings.onDismiss = ^{ [weakSelf updateIntervalLabel]; };
     [self presentViewController:settings animated:YES completion:nil];
 }
 
@@ -2404,6 +2462,9 @@ static void initializeManager(void) {
     manager.enableAutoPatrol = NO;
     manager.enableAutoPatrolNew = [defaults objectForKey:@"enableAutoPatrolNew"] ? [defaults boolForKey:@"enableAutoPatrolNew"] : YES;
     manager.enableBackgroundLoop = [defaults objectForKey:@"enableBackgroundLoop"] ? [defaults boolForKey:@"enableBackgroundLoop"] : YES;
+    manager.enableBackgroundLoopTimeRange = [defaults boolForKey:@"enableBackgroundLoopTimeRange"];
+    manager.backgroundLoopStartTime = [defaults stringForKey:@"backgroundLoopStartTime"] ?: @"00:00";
+    manager.backgroundLoopEndTime = [defaults stringForKey:@"backgroundLoopEndTime"] ?: @"23:59";
     manager.enableScheduledCollect = [defaults boolForKey:@"enableScheduledCollect"];
     manager.scheduledTimes = [defaults arrayForKey:@"scheduledCollectTimes"] ?: @[];
     manager.enableAutoWater = [defaults boolForKey:@"enableAutoWater"];

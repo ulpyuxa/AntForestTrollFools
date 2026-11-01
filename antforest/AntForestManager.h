@@ -45,6 +45,10 @@ NS_ASSUME_NONNULL_BEGIN
 @property (assign, nonatomic) BOOL enableAutoEarn;
 @property (assign, nonatomic) BOOL enableAutoRevive;
 @property (assign, nonatomic) BOOL enableBackgroundLoop;
+@property (assign, nonatomic) BOOL enableBackgroundLoopTimeRange; // 后台循环仅在指定时间段内执行
+@property (nonatomic, copy) NSString *backgroundLoopStartTime;   // 后台循环开始时间，格式 HH:mm，默认 @"00:00"
+@property (nonatomic, copy) NSString *backgroundLoopEndTime;     // 后台循环结束时间，格式 HH:mm，默认 @"23:59"（支持跨午夜，如 22:00-06:00）
+- (BOOL)isWithinBackgroundLoopTimeRange;
 @property (assign, nonatomic) BOOL enableScheduledCollect;
 @property (nonatomic, strong) NSArray<NSString *> *scheduledTimes;
 @property (assign, nonatomic) BOOL enableAutoWater;

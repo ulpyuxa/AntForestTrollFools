@@ -1230,12 +1230,46 @@ static dispatch_source_t sBackgroundPulseTimer = nil;
     // 使用 NSRunLoopCommonModes 防止界面交互或真后台模式切换时定时器冻结
     self.autoCollectTimer = [NSTimer timerWithTimeInterval:interval
                                                     target:self
-                                                  selector:@selector(autoCollectBubbles)
+                                                  selector:@selector(backgroundLoopTimerFired)
                                                   userInfo:nil
                                                    repeats:YES];
     [[NSRunLoop mainRunLoop] addTimer:self.autoCollectTimer forMode:NSRunLoopCommonModes];
     [self ensureBackgroundPulseTimer];
     [self.autoCollectTimer fire];
+}
+
+// 后台循环时间段判定：未开启时间段限制 → 始终允许；开启后仅在 [start, end] 内允许（含两端，分钟精度）。
+// 支持跨午夜区间（如 22:00 - 06:00）。start == end 视为全天允许。
+- (BOOL)isWithinBackgroundLoopTimeRange {
+    if (!self.enableBackgroundLoopTimeRange) return YES;
+    NSInteger (^parse)(NSString *, NSInteger) = ^NSInteger(NSString *s, NSInteger fallback) {
+        NSArray *parts = [s componentsSeparatedByString:@":"];
+        if (parts.count < 2) return fallback;
+        NSInteger h = [parts[0] integerValue], m = [parts[1] integerValue];
+        if (h < 0 || h > 23 || m < 0 || m > 59) return fallback;
+        return h * 60 + m;
+    };
+    NSInteger start = parse(self.backgroundLoopStartTime ?: @"", 0);
+    NSInteger end = parse(self.backgroundLoopEndTime ?: @"", 23 * 60 + 59);
+    if (start == end) return YES;
+    NSDateComponents *c = [[NSCalendar currentCalendar] components:(NSCalendarUnitHour | NSCalendarUnitMinute) fromDate:[NSDate date]];
+    NSInteger now = c.hour * 60 + c.minute;
+    if (start < end) return now >= start && now <= end;
+    return now >= start || now <= end; // 跨午夜
+}
+
+// 后台循环定时器回调：仅在允许的时间段内触发一轮扫描；时段外静默跳过（每天只记一次日志，避免刷屏）
+- (void)backgroundLoopTimerFired {
+    if (![self isWithinBackgroundLoopTimeRange]) {
+        static NSString *sLastSkipLogDay = nil;
+        NSString *today = getCurrentDateString();
+        if (![sLastSkipLogDay isEqualToString:today]) {
+            sLastSkipLogDay = today;
+            [self recordStage:[NSString stringWithFormat:@"后台循环 · 当前不在执行时段（%@ - %@），本轮及后续轮次将静默跳过", self.backgroundLoopStartTime ?: @"00:00", self.backgroundLoopEndTime ?: @"23:59"]];
+        }
+        return;
+    }
+    [self autoCollectBubbles];
 }
 
 -(void)stopAutoCollectTimer {
