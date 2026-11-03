@@ -744,7 +744,8 @@ static NSInteger reviveDailyCount(void) {
     NSUInteger requestToken = ++waterRequestToken;
     waterAwaitingHome = YES;
     waterAwaitingLimit = waterAwaitingTransfer = NO;
-    NSDictionary *body = @{ @"userId": waterCurrentUserId, @"version": @"20241025", @"source": @"chInfo_ch_appcenter__chsub_9patch", @"fromAct": @"TAKE_LOOK", @"configVersionMap": @{ @"wateringBubbleConfig": @"0" }, @"skipWhackMole": @NO, @"activityParam": @{}, @"currentEnergy": @99999999, @"currentVitalityAmount": @8888888 };
+    // fix4: 移除伪造的 currentEnergy/currentVitalityAmount 固定值（明显的客户端指纹），服务端不依赖该字段
+    NSDictionary *body = @{ @"userId": waterCurrentUserId, @"version": @"20241025", @"source": @"chInfo_ch_appcenter__chsub_9patch", @"fromAct": @"TAKE_LOOK", @"configVersionMap": @{ @"wateringBubbleConfig": @"0" }, @"skipWhackMole": @NO, @"activityParam": @{} };
     [self waterSendRPC:@"alipay.antforest.forest.h5.queryFriendHomePage" body:body];
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         if (!waterRunning || requestToken != waterRequestToken || !waterAwaitingHome) return;
@@ -1905,7 +1906,8 @@ static NSTimeInterval lastMyBubblesQueryTime = 0;
     NSString *timeStamp = [NSString stringWithFormat:@"%ld",(long)[[NSDate  date] timeIntervalSince1970]*1000];
     NSString *randNum=[AntForestManager getNumberRandom:15];
     NSString *callbackId = [NSString stringWithFormat:@"rpc_af_silent_friend_%@.%@", timeStamp, randNum];
-    NSString *arg1=[NSString stringWithFormat:@"[{\"handlerName\":\"rpc\",\"data\":{\"operationType\":\"alipay.antforest.forest.h5.queryFriendHomePage\",\"showError\":false,\"showLoading\":false,\"requestData\":[{\"userId\":\"%@\",\"version\":\"%@\",\"source\":\"chInfo_ch_appcenter__chsub_9patch\",\"fromAct\":\"TAKE_LOOK\",\"configVersionMap\":{\"wateringBubbleConfig\":\"0\"},\"skipWhackMole\":false,\"activityParam\":{},\"currentEnergy\":99999999,\"currentVitalityAmount\":8888888}]},\"callbackId\":\"%@\"}]",friendId,version,callbackId];
+    // fix4: 移除伪造的 currentEnergy/currentVitalityAmount 固定值，避免每日数百次上报异常数值形成指纹
+    NSString *arg1=[NSString stringWithFormat:@"[{\"handlerName\":\"rpc\",\"data\":{\"operationType\":\"alipay.antforest.forest.h5.queryFriendHomePage\",\"showError\":false,\"showLoading\":false,\"requestData\":[{\"userId\":\"%@\",\"version\":\"%@\",\"source\":\"chInfo_ch_appcenter__chsub_9patch\",\"fromAct\":\"TAKE_LOOK\",\"configVersionMap\":{\"wateringBubbleConfig\":\"0\"},\"skipWhackMole\":false,\"activityParam\":{}}]},\"callbackId\":\"%@\"}]",friendId,version,callbackId];
     NSString *arg2 = @"https://render.alipay.com/p/yuyan/180020010001247580/home.html?__webview_options__=bc%3D3194732";
     
     if([self jsBridge]) {
